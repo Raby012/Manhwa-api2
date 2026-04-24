@@ -78,4 +78,4 @@ async function searchAndGetChapters(title) {
     
   } catch (e) {
     console.error("[MANGANATO] Search Error:", e.message);
-    return[];
+    return
