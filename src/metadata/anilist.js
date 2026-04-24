@@ -1,99 +1,137 @@
 const axios = require('axios');
-const ANILIST_URL = 'https://graphql.anilist.co';
+const BASE = 'https://api.mangadex.org';
+const headers = { 'Accept': 'application/json', 'User-Agent': 'ManhwaHub-V3-Render' };
 
-function formatMedia(m) {
-  if (!m) return null;
+function buildManga(m) {
+  const cover = m.relationships.find(r => r.type === 'cover_art');
+  const author = m.relationships.find(r => r.type === 'author');
+  const fileName = cover?.attributes?.fileName || '';
+  const lang = m.attributes.originalLanguage;
+  
+  const titleObj = m.attributes.title || {};
+  const altTitles = m.attributes.altTitles ||[];
+  let enAltTitle = null;
+  for (let alt of altTitles) {
+      if (alt.en) { enAltTitle = alt.en; break; }
+  }
+  const title = enAltTitle || titleObj.en || Object.values(titleObj)[0] || 'Unknown';
+  
   return {
-    slug: m.id.toString(), // FIXED: Frontend requires this to be named 'slug'
-    title: m.title.english || m.title.romaji || m.title.native || 'Unknown',
-    image: m.coverImage?.extraLarge || '',
-    type: m.countryOfOrigin === 'KR' ? 'manhwa' : m.countryOfOrigin === 'CN' ? 'manhua' : 'manga',
-    status: m.status || 'UNKNOWN'
+    slug: m.id, // MangaDex ID
+    title,
+    image: fileName ? `https://uploads.mangadex.org/covers/${m.id}/${fileName}.256.jpg` : '',
+    type: lang === 'ko' ? 'manhwa' : (lang === 'zh' || lang === 'zh-hk') ? 'manhua' : 'manga',
+    status: m.attributes.status || 'UNKNOWN'
   };
 }
 
-async function getHomepage() {
-  const query = `query {
-    trending: Page(page: 1, perPage: 20) { media(type: MANGA, sort: TRENDING_DESC) { id title { romaji english native } coverImage { extraLarge } countryOfOrigin status } }
-    popular: Page(page: 1, perPage: 20) { media(type: MANGA, sort: POPULAR_DESC) { id title { romaji english native } coverImage { extraLarge } countryOfOrigin status } }
-    manhwa: Page(page: 1, perPage: 20) { media(type: MANGA, sort: TRENDING_DESC, countryOfOrigin: "KR") { id title { romaji english native } coverImage { extraLarge } countryOfOrigin status } }
-  }`;
+async function fetchManga(page, order = { updatedAt: 'desc' }, extraParams = {}) {
+  const limit = 30;
+  const offset = (parseInt(page) - 1) * limit;
   try {
-    const res = await axios.post(ANILIST_URL, { query });
-    const data = res.data.data;
+    const res = await axios.get(`${BASE}/manga`, {
+      headers,
+      params: {
+        limit, offset,
+        originalLanguage:['ko', 'ja', 'zh', 'zh-hk'],
+        order,
+        includes:['cover_art', 'author'],
+        availableTranslatedLanguage: ['en'],
+        contentRating: ['safe', 'suggestive'],
+        ...extraParams,
+      }
+    });
     return {
-      trending: data.trending.media.map(formatMedia),
-      popular: data.popular.media.map(formatMedia),
-      latest: data.popular.media.map(formatMedia), // Fallback for old frontend maps
-      new_arrivals: data.manhwa.media.map(formatMedia)
+      list: res.data.data.map(buildManga),
+      current_page: parseInt(page),
+      total: res.data.total,
+      total_pages: Math.ceil(res.data.total / limit),
     };
+  } catch (e) {
+    console.error("MangaDex Fetch Error:", e.message);
+    return { list:[], total: 0, current_page: page };
+  }
+}
+
+async function getHomepage() {
+  try {
+    const [t, p, n] = await Promise.all([
+      fetchManga(1, { followedCount: 'desc' }, { createdAtSince: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('.')[0] }), // Trending (Popular this month)
+      fetchManga(1, { followedCount: 'desc' }), // Popular
+      fetchManga(1, { createdAt: 'desc' }, { originalLanguage: ['ko'] }) // New Manhwa
+    ]);
+    return { trending: t.list, popular: p.list, latest: p.list, new_arrivals: n.list };
   } catch (e) { return { trending:[], popular: [], latest: [], new_arrivals:[] }; }
+}
+
+async function categoryFetch(page, sortStr, country) {
+  let order = { followedCount: 'desc' };
+  if (sortStr === 'latest') order = { updatedAt: 'desc' };
+  
+  let extraParams = {};
+  if (country === 'manhwa') extraParams.originalLanguage = ['ko'];
+  if (country === 'manhua') extraParams.originalLanguage =['zh', 'zh-hk'];
+  if (country === 'manga') extraParams.originalLanguage =['ja'];
+
+  return await fetchManga(page, order, extraParams);
 }
 
 async function searchManga(query, page = 1) {
   if (!query) return { list:[], total: 0, current_page: page };
-  const queryStr = `query ($search: String, $page: Int) {
-    Page(page: $page, perPage: 24) { pageInfo { total currentPage hasNextPage } media(search: $search, type: MANGA, sort: SEARCH_MATCH) { id title { romaji english native } coverImage { extraLarge } countryOfOrigin status } }
-  }`;
+  const limit = 24; const offset = (parseInt(page) - 1) * limit;
   try {
-    const res = await axios.post(ANILIST_URL, { query: queryStr, variables: { search: query, page: parseInt(page) } });
-    const data = res.data.data.Page;
-    return { list: data.media.map(formatMedia), current_page: data.pageInfo.currentPage, total: data.pageInfo.total };
+    const res = await axios.get(`${BASE}/manga`, {
+      headers,
+      params: { title: query, limit, offset, includes:['cover_art', 'author'], availableTranslatedLanguage: ['en'], order: { relevance: 'desc' } }
+    });
+    return { list: res.data.data.map(buildManga), total: res.data.total, current_page: parseInt(page) };
   } catch (e) { return { list:[], total: 0, current_page: page }; }
 }
 
-async function getInfo(anilistId) {
-  const query = `query ($id: Int) {
-    Media(id: $id, type: MANGA) { id title { romaji english native } coverImage { extraLarge } bannerImage description(asHtml: false) status countryOfOrigin startDate { year } genres tags { name rank } staff { edges { role node { name { full } } } } }
-  }`;
-  try {
-    const res = await axios.post(ANILIST_URL, { query, variables: { id: parseInt(anilistId) } });
-    const m = res.data.data.Media;
-    let authorName = 'Unknown';
-    if (m.staff && m.staff.edges) {
-        const authorEdge = m.staff.edges.find(e => e.role.toLowerCase().includes('story') || e.role.toLowerCase().includes('art'));
-        if (authorEdge) authorName = authorEdge.node.name.full;
-    }
-    let cleanDesc = m.description ? m.description.replace(/<[^>]*>?/gm, '') : '';
-    return {
-      slug: m.id.toString(), page: m.title.english || m.title.romaji || 'Unknown', alt_titles:[m.title.english, m.title.romaji, m.title.native].filter(Boolean),
-      poster: m.coverImage?.extraLarge || '', banner: m.bannerImage || '', description: cleanDesc, status: m.status || 'UNKNOWN',
-      type: m.countryOfOrigin === 'KR' ? 'manhwa' : m.countryOfOrigin === 'CN' ? 'manhua' : 'manga', authors: authorName, year: m.startDate?.year?.toString() || '',
-      genres: m.genres ||[], themes: m.tags?.filter(t => t.rank >= 50).map(t => t.name) ||[], ch_list:[], total_chapters: 0
-    };
-  } catch (e) { return { error: e.message }; }
-}
-
-// FIXED: Added Advanced Browse functionality
 async function browse(page = 1, filters = {}) {
-  const queryStr = `query ($page: Int, $sort: [MediaSort], $country: String, $status: MediaStatus) {
-    Page(page: $page, perPage: 24) { pageInfo { total currentPage } media(type: MANGA, sort: $sort, countryOfOrigin: $country, status: $status) { id title { romaji english native } coverImage { extraLarge } countryOfOrigin status } }
-  }`;
+  const limit = 24; const offset = (parseInt(page) - 1) * limit;
+  const params = { limit, offset, includes: ['cover_art', 'author'], availableTranslatedLanguage: ['en'] };
+  
+  if (filters.type === 'manhwa') params.originalLanguage = ['ko'];
+  else if (filters.type === 'manhua') params.originalLanguage =['zh', 'zh-hk'];
+  else if (filters.type === 'manga') params.originalLanguage =['ja'];
+  else params.originalLanguage = ['ko', 'ja', 'zh', 'zh-hk'];
+  
+  if (filters.status && filters.status !== 'All') params['status[]'] = filters.status.toLowerCase();
+  
+  const orderMap = { popular: { followedCount: 'desc' }, latest: { updatedAt: 'desc' }, new: { createdAt: 'desc' } };
+  params.order = orderMap[filters.sort || 'popular'];
+
   try {
-    let sort = ['POPULAR_DESC'];
-    if (filters.sort === 'latest') sort = ['UPDATED_AT_DESC'];
-    else if (filters.sort === 'new') sort = ['START_DATE_DESC'];
-    else if (filters.sort === 'az') sort = ['TITLE_ENGLISH'];
-
-    let country = undefined;
-    if (filters.type === 'manhwa') country = 'KR';
-    else if (filters.type === 'manhua') country = 'CN';
-    else if (filters.type === 'manga') country = 'JP';
-
-    let status = undefined;
-    if (filters.status && filters.status.toLowerCase() !== 'all') {
-      const s = filters.status.toUpperCase();
-      if (['FINISHED', 'RELEASING', 'HIATUS', 'CANCELLED'].includes(s)) status = s;
-    }
-
-    const res = await axios.post(ANILIST_URL, { query: queryStr, variables: { page: parseInt(page), sort, country, status } });
-    const data = res.data.data.Page;
-    return { list: data.media.map(formatMedia), current_page: data.pageInfo.currentPage, total: data.pageInfo.total, total_pages: Math.ceil(data.pageInfo.total / 24) };
+    const res = await axios.get(`${BASE}/manga`, { headers, params });
+    return { list: res.data.data.map(buildManga), total: res.data.total, current_page: parseInt(page), total_pages: Math.ceil(res.data.total / limit) };
   } catch (e) { return { list:[], total: 0 }; }
 }
 
-async function categoryFetch(page, sortStr, country) {
-  return await browse(page, { sort: sortStr, type: country });
+async function getInfo(id) {
+  try {
+    const res = await axios.get(`${BASE}/manga/${id}`, { headers, params: { includes: ['cover_art', 'author', 'artist'] } });
+    const m = res.data.data;
+    const cover = m.relationships.find(r => r.type === 'cover_art');
+    const author = m.relationships.find(r => r.type === 'author');
+    const fileName = cover?.attributes?.fileName || '';
+    
+    const titleObj = m.attributes.title || {};
+    const altTitles = m.attributes.altTitles ||[];
+    let enAltTitle = '';
+    for (let alt of altTitles) { if (alt.en) { enAltTitle = alt.en; break; } }
+    const title = enAltTitle || titleObj.en || Object.values(titleObj)[0] || 'Unknown';
+
+    return {
+      slug: m.id, page: title, alt_en: enAltTitle,
+      poster: fileName ? `https://uploads.mangadex.org/covers/${id}/${fileName}.512.jpg` : '',
+      description: m.attributes.description?.en || '', status: m.attributes.status || 'UNKNOWN',
+      type: m.attributes.originalLanguage === 'ko' ? 'manhwa' : 'manga',
+      authors: author?.attributes?.name || 'Unknown', year: m.attributes.year || '',
+      genres: (m.attributes.tags ||[]).filter(t => t.attributes.group === 'genre').map(t => t.attributes.name.en || ''),
+      ch_list:[], total_chapters: 0
+    };
+  } catch (e) { return { error: e.message }; }
 }
 
 module.exports = { getHomepage, searchManga, getInfo, browse, categoryFetch };
