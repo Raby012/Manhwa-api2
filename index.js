@@ -2,10 +2,10 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const redis = require('redis');
-const { MongoClient } = require('mongodb'); // ADDED: MongoDB Library
+const { MongoClient } = require('mongodb');
 
+// Note: "anilist" here now uses the mangadex_meta file we just created
 const anilist = require('./src/metadata/anilist'); 
-const mapper = require('./src/core/mapper');
 const mangadex = require('./src/providers/mangadex');
 const manganato = require('./src/providers/manganato');
 const comick = require('./src/providers/comick');
@@ -27,6 +27,8 @@ let redisClient = null;
       await redisClient.connect();
       console.log('✅ Connected to Redis Cloud Successfully!');
     } catch(e) { console.error("Redis Failed:", e.message) }
+  } else {
+    console.log('⚠️ No REDIS_URL found in Environment Variables.');
   }
 })();
 
@@ -52,7 +54,7 @@ let db = null;
     try {
       const mongoClient = new MongoClient(process.env.MONGO_URI);
       await mongoClient.connect();
-      db = mongoClient.db('manhwahub'); // Creates a database named 'manhwahub'
+      db = mongoClient.db('manhwahub'); 
       console.log('✅ MongoDB Database Connected Successfully!');
     } catch(e) { console.error("❌ MongoDB Failed:", e.message) }
   } else {
@@ -69,14 +71,11 @@ app.post('/api/user/history', async (req, res) => {
 
   try {
     const historyCollection = db.collection('history');
-    
-    // Upsert: If the user already read this manga, update the chapter. If not, create new entry.
     await historyCollection.updateOne(
       { userId, mangaId }, 
       { $set: { title, cover, chapterId, chapterNumber, updatedAt: new Date() } },
       { upsert: true }
     );
-    
     res.json({ status: "success", message: "History saved" });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -101,41 +100,91 @@ app.get('/api/user/history/:userId', async (req, res) => {
 // METADATA ROUTES
 // ==========================================
 app.get('/', (req, res) => res.json({ status: 'ok', message: 'ManhwaHub V2 Core Running' }));
-app.get('/api/home', checkCache, async (req, res) => { const data = await anilist.getHomepage(); await saveToCache(req.originalUrl, data, 300); res.json(data); });
-app.get('/api/latest/:page', checkCache, async (req, res) => { const data = await anilist.categoryFetch(req.params.page, 'latest'); await saveToCache(req.originalUrl, data, 600); res.json(data); });
-app.get('/api/all/:page', checkCache, async (req, res) => { const data = await anilist.categoryFetch(req.params.page, 'popular'); await saveToCache(req.originalUrl, data, 600); res.json(data); });
-app.get('/api/trending/:page', checkCache, async (req, res) => { const data = await anilist.categoryFetch(req.params.page, 'popular'); await saveToCache(req.originalUrl, data, 600); res.json(data); });
-app.get('/api/manhwa/:page', checkCache, async (req, res) => { const data = await anilist.categoryFetch(req.params.page, 'popular', 'manhwa'); await saveToCache(req.originalUrl, data, 600); res.json(data); });
-app.get('/api/manhua/:page', checkCache, async (req, res) => { const data = await anilist.categoryFetch(req.params.page, 'popular', 'manhua'); await saveToCache(req.originalUrl, data, 600); res.json(data); });
-app.get('/api/manga/:page', checkCache, async (req, res) => { const data = await anilist.categoryFetch(req.params.page, 'popular', 'manga'); await saveToCache(req.originalUrl, data, 600); res.json(data); });
-app.get('/api/browse/:page', async (req, res) => { const filters = { type: req.query.type || '', status: req.query.status || '', sort: req.query.sort || 'popular', genre: req.query.genre || '' }; res.json(await anilist.browse(req.params.page || 1, filters)); });
+
+app.get('/api/home', checkCache, async (req, res) => { 
+  const data = await anilist.getHomepage(); 
+  await saveToCache(req.originalUrl, data, 300); 
+  res.json(data); 
+});
+
+app.get('/api/latest/:page', checkCache, async (req, res) => { 
+  const data = await anilist.categoryFetch(req.params.page, 'latest'); 
+  await saveToCache(req.originalUrl, data, 600); 
+  res.json(data); 
+});
+
+app.get('/api/all/:page', checkCache, async (req, res) => { 
+  const data = await anilist.categoryFetch(req.params.page, 'popular'); 
+  await saveToCache(req.originalUrl, data, 600); 
+  res.json(data); 
+});
+
+app.get('/api/trending/:page', checkCache, async (req, res) => { 
+  const data = await anilist.categoryFetch(req.params.page, 'popular'); 
+  await saveToCache(req.originalUrl, data, 600); 
+  res.json(data); 
+});
+
+app.get('/api/manhwa/:page', checkCache, async (req, res) => { 
+  const data = await anilist.categoryFetch(req.params.page, 'popular', 'manhwa'); 
+  await saveToCache(req.originalUrl, data, 600); 
+  res.json(data); 
+});
+
+app.get('/api/manhua/:page', checkCache, async (req, res) => { 
+  const data = await anilist.categoryFetch(req.params.page, 'popular', 'manhua'); 
+  await saveToCache(req.originalUrl, data, 600); 
+  res.json(data); 
+});
+
+app.get('/api/manga/:page', checkCache, async (req, res) => { 
+  const data = await anilist.categoryFetch(req.params.page, 'popular', 'manga'); 
+  await saveToCache(req.originalUrl, data, 600); 
+  res.json(data); 
+});
+
+app.get('/api/browse/:page', async (req, res) => { 
+  const filters = { type: req.query.type || '', status: req.query.status || '', sort: req.query.sort || 'popular', genre: req.query.genre || '' }; 
+  res.json(await anilist.browse(req.params.page || 1, filters)); 
+});
+
 app.get('/api/search/:query', async (req, res) => res.json(await anilist.searchManga(req.params.query, req.query.page || 1)));
+
 app.get('/api/search', async (req, res) => res.json(await anilist.searchManga(req.query.q || req.query.query || '', req.query.page || 1)));
-app.get('/api/info/:id', checkCache, async (req, res) => { const data = await anilist.getInfo(req.params.id); await saveToCache(req.originalUrl, data, 86400); res.json(data); });
+
+app.get('/api/info/:id', checkCache, async (req, res) => { 
+  const data = await anilist.getInfo(req.params.id); 
+  await saveToCache(req.originalUrl, data, 86400); 
+  res.json(data); 
+});
 
 // ==========================================
 // CHAPTER ROUTES
 // ==========================================
-app.get('/api/chapters/:anilistId', checkCache, async (req, res) => {
-  const anilistId = req.params.anilistId;
-  const mappings = await mapper.getProviderIds(anilistId);
-  let finalChapters =[];
+app.get('/api/chapters/:id', checkCache, async (req, res) => {
+  const mangaDexId = req.params.id; 
+  
+  let finalChapters = await mangadex.getChapters(mangaDexId);
 
-  if (mappings.mangadex) finalChapters = await mangadex.getChapters(mappings.mangadex);
-
+  // If MangaDex deleted the chapters (like Lookism or ORV)
   if (finalChapters.length < 15) {
-      let natoChapters =[];
-      if (mappings.manganato) natoChapters = await manganato.getChapters(mappings.manganato);
-      else {
-          const info = await anilist.getInfo(anilistId);
-          const searchTitle = info.alt_titles[0] || info.page;
-          if (searchTitle) natoChapters = await manganato.searchAndGetChapters(searchTitle);
+      console.log(`[WATERFALL] MangaDex missing chapters. Trying Manganato/ComicK...`);
+      const info = await anilist.getInfo(mangaDexId); 
+      const searchTitle = info.alt_en || info.page;
+      
+      let natoChapters = [];
+      let ckChapters =[];
+      
+      if (searchTitle) {
+          // Try both fallbacks simultaneously
+          await Promise.all([
+            (async () => { natoChapters = await manganato.searchAndGetChapters(searchTitle); })(),
+            (async () => { ckChapters = await comick.searchAndGetChapters(searchTitle); })()
+          ]);
       }
-      if (natoChapters.length > finalChapters.length) finalChapters = natoChapters;
-  }
 
-  if (finalChapters.length < 15 && mappings.comick) {
-      const ckChapters = await comick.getChapters(mappings.comick);
+      // Pick the best fallback
+      if (natoChapters.length > finalChapters.length) finalChapters = natoChapters;
       if (ckChapters.length > finalChapters.length) finalChapters = ckChapters;
   }
 
@@ -156,11 +205,16 @@ app.get('/api/proxy/image', async (req, res) => {
   const imageUrl = req.query.url;
   if (!imageUrl) return res.status(400).send('No image URL provided');
   try {
-    const response = await axios.get(imageUrl, { responseType: 'arraybuffer', headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://manganato.com/' } });
+    const response = await axios.get(imageUrl, { 
+      responseType: 'arraybuffer', 
+      headers: { 'User-Agent': 'Mozilla/5.0', 'Referer': 'https://manganato.com/' } 
+    });
     res.setHeader('Content-Type', response.headers['content-type']);
     res.setHeader('Cache-Control', 'public, max-age=86400'); 
     res.send(response.data);
-  } catch (error) { res.status(500).send('Failed to load image'); }
+  } catch (error) { 
+    res.status(500).send('Failed to load image'); 
+  }
 });
 
 const PORT = process.env.PORT || 3000;
