@@ -1,128 +1,114 @@
 let gotScraping;
 
-// Load client
+// Reusable fetch init
 async function getClient() {
   if (!gotScraping) {
-    const mod = await import('got-scraping');
-    gotScraping = mod.gotScraping;
+    const module = await import('got-scraping');
+    gotScraping = module.gotScraping;
   }
   return gotScraping;
 }
 
-// ============================
-// 1. GET CHAPTERS FROM URL
-// ============================
-async function getChapters(comickUrl) {
-  if (!comickUrl) return [];
+// Safe JSON parser
+function safeParse(body) {
+  try {
+    return typeof body === "string" ? JSON.parse(body) : body;
+  } catch {
+    return null;
+  }
+}
 
+// Extract slug safely
+function extractSlug(url) {
+  if (!url) return null;
+  const parts = url.split('/').filter(Boolean);
+  return parts[parts.length - 1];
+}
+
+// =============================
+// MAIN CHAPTER FETCH
+// =============================
+async function getChapters(comickUrl) {
   try {
     const client = await getClient();
 
-    const slug = comickUrl.split('/').filter(Boolean).pop();
-
+    const slug = extractSlug(comickUrl);
     if (!slug) return [];
 
-    // Step 1: get comic info
+    // 1. Get HID
     const infoRes = await client({
       url: `https://api.comick.io/comic/${slug}`,
       headers: {
-        "user-agent": "Mozilla/5.0",
-        "accept": "application/json"
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
       }
     });
 
-    const info = JSON.parse(infoRes.body);
+    const info = safeParse(infoRes.body);
+    const hid = info?.comic?.hid;
+    if (!hid) return [];
 
-    if (!info?.comic?.hid) {
-      console.log("[COMICK] No HID found");
-      return [];
-    }
-
-    const hid = info.comic.hid;
-
-    // Step 2: get chapters
+    // 2. Get chapters
     const chRes = await client({
-      url: `https://api.comick.io/comic/${hid}/chapters?lang=en&limit=500`,
+      url: `https://api.comick.io/comic/${hid}/chapters?lang=en&limit=9999&tachiyomi=true`,
       headers: {
-        "user-agent": "Mozilla/5.0",
-        "accept": "application/json"
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
       }
     });
 
-    const data = JSON.parse(chRes.body);
+    const data = safeParse(chRes.body);
     const chapters = data?.chapters || [];
 
-    return chapters
-      .map((c, i) => ({
-        ch_title: `Chapter ${c.chap || i}`,
-        chapter_number: c.chap || `${i}`,
-        slug: `comick_${c.hid}`,
-        time: c.created_at || '',
-        provider: 'ComicK'
-      }))
-      .reverse(); // oldest → newest
+    return chapters.map((c) => ({
+      ch_title: `Chapter ${c.chap || '0'} (ComicK)`,
+      chapter_number: c.chap || '0',
+      slug: `comick_${c.hid}`,
+      time: c.created_at || '',
+      provider: 'ComicK'
+    }));
 
   } catch (err) {
-    console.error("[COMICK] Chapter Error:", err.message);
+    console.error("[COMICK] getChapters error:", err.message);
     return [];
   }
 }
 
-// ============================
-// 2. SEARCH + FETCH
-// ============================
+// =============================
+// SEARCH + FETCH
+// =============================
 async function searchAndGetChapters(title) {
   try {
     const client = await getClient();
 
+    if (!title) return [];
+
+    const cleanTitle = title
+      .replace(/[^a-zA-Z0-9 ]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!cleanTitle) return [];
+
     const searchRes = await client({
-      url: `https://api.comick.io/v1.0/search?q=${encodeURIComponent(title)}&limit=3`,
+      url: `https://api.comick.io/v1.0/search?q=${encodeURIComponent(cleanTitle)}&limit=3&tachiyomi=true`,
       headers: {
-        "user-agent": "Mozilla/5.0",
-        "accept": "application/json"
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
       }
     });
 
-    const results = JSON.parse(searchRes.body);
+    const data = safeParse(searchRes.body);
+    if (!Array.isArray(data) || data.length === 0) return [];
 
-    if (!Array.isArray(results) || results.length === 0) {
-      console.log("[COMICK] No search result:", title);
-      return [];
-    }
+    // Try best match (first result)
+    const hid = data[0]?.hid;
+    if (!hid) return [];
 
-    // take best match
-    const best = results[0];
-
-    if (!best?.hid) return [];
-
-    const chRes = await client({
-      url: `https://api.comick.io/comic/${best.hid}/chapters?lang=en&limit=500`,
-      headers: {
-        "user-agent": "Mozilla/5.0",
-        "accept": "application/json"
-      }
-    });
-
-    const data = JSON.parse(chRes.body);
-    const chapters = data?.chapters || [];
-
-    return chapters
-      .map((c, i) => ({
-        ch_title: `Chapter ${c.chap || i}`,
-        chapter_number: c.chap || `${i}`,
-        slug: `comick_${c.hid}`,
-        time: c.created_at || '',
-        provider: 'ComicK'
-      }))
-      .reverse();
+    return await getChapters(`https://comick.io/comic/${hid}`);
 
   } catch (e) {
-    console.error("[COMICK] Search Error:", e.message);
-    return []; // FIXED
+    console.error("[COMICK] search error:", e.message);
+    return [];
   }
 }
-
-module.exports = {
-  getChapters,
-  searchAndGetChapters
-};
